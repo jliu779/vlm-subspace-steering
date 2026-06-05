@@ -44,7 +44,7 @@ def load_gemma3(
 
     model = Gemma3ForConditionalGeneration.from_pretrained(
         model_path,
-        dtype=dtype,
+        torch_dtype=dtype,
         device_map=device_map,
         attn_implementation=attn_implementation,
     ).eval()

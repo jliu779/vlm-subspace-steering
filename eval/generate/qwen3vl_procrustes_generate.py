@@ -25,7 +25,7 @@ from procrustes.io import load_params
 def load_qwen3vl(model_path: str, dtype=torch.bfloat16):
     from transformers import Qwen3VLForConditionalGeneration, AutoProcessor
     model = Qwen3VLForConditionalGeneration.from_pretrained(
-        model_path, dtype=dtype, device_map="auto",
+        model_path, torch_dtype=dtype, device_map="auto",
     )
     processor = AutoProcessor.from_pretrained(model_path)
     return model, processor

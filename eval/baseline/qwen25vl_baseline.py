@@ -19,7 +19,7 @@ from procrustes.cmrm_compat import read_manifest
 def load_qwen25vl(model_path: str, dtype=torch.bfloat16):
     from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
     model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-        model_path, dtype=dtype, device_map="auto",
+        model_path, torch_dtype=dtype, device_map="auto",
     )
     processor = AutoProcessor.from_pretrained(model_path)
     return model, processor

@@ -19,7 +19,7 @@ from procrustes.cmrm_compat import read_manifest
 def load_llava_next(model_path: str, dtype=torch.bfloat16):
     from transformers import LlavaNextForConditionalGeneration, LlavaNextProcessor
     model = LlavaNextForConditionalGeneration.from_pretrained(
-        model_path, dtype=dtype, device_map="auto",
+        model_path, torch_dtype=dtype, device_map="auto",
     )
     processor = LlavaNextProcessor.from_pretrained(model_path)
     return model, processor
