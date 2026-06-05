@@ -1,0 +1,9 @@
+# Default judge config for eval/judge/*.py
+# Edit judge_model_id and model_root to match your machine.
+model:
+  target_model_id: unused
+  judge_model_id: meta-llama/Meta-Llama-3.1-8B-Instruct
+  dtype: bfloat16
+  device_map: auto
+paths:
+  model_root: /hub/huggingface/models
