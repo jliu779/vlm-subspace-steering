@@ -11,9 +11,11 @@ so the existing fit + hook scripts can reuse it:
 """
 from __future__ import annotations
 
-from typing import Tuple
+import inspect
+from typing import Callable, Tuple
 
 import torch
+import torch.nn.functional as F
 from PIL import Image
 
 
@@ -22,12 +24,23 @@ def _torch_lt_2_6() -> bool:
     return (major, minor) < (2, 6)
 
 
-def _patch_masking_utils_for_torch25() -> None:
-    """Allow Gemma3 multimodal masks on torch 2.5.x.
+def _block_sequence_ids_from_token_type_ids(
+    token_type_ids: torch.Tensor, device: torch.device
+) -> torch.Tensor:
+    """Same grouping logic as transformers Gemma3/PaliGemma image masks."""
+    is_image = (token_type_ids == 1).to(device=device)
+    is_previous_image = F.pad(is_image, (1, 0), value=0)[:, :-1]
+    new_image_start = is_image & ~is_previous_image
+    group_ids = torch.cumsum(new_image_start.int(), dim=1) - 1
+    return torch.where(is_image, group_ids, -1)
 
-    transformers>=5.x gates `or_mask_function` / `and_mask_function` behind
-    torch>=2.6 even though eager attention on 2.5 can materialize the same 4D
-    masks via vmap. Gemma3 always hits this path for image token_type_ids.
+
+def _patch_masking_utils_for_torch25() -> None:
+    """Run Gemma3 image masks on torch 2.5 without vmap.
+
+    transformers>=5.7 routes Gemma3 `token_type_ids` through `or_mask_function`,
+    which is gated to torch>=2.6 and defaults to `use_vmap=True`. The mask
+    functions are index/tensor-based and work with the non-vmap broadcast path.
     """
     if not _torch_lt_2_6():
         return
@@ -37,8 +50,111 @@ def _patch_masking_utils_for_torch25() -> None:
         return
     if getattr(masking_utils, "_gemma3_torch25_mask_patch", False):
         return
-    masking_utils._is_torch_greater_or_equal_than_2_6 = True
+
+    orig_sdpa_mask = masking_utils.sdpa_mask
+
+    def sdpa_mask_no_vmap(*args, use_vmap: bool = False, **kwargs):
+        return orig_sdpa_mask(*args, use_vmap=False, **kwargs)
+
+    masking_utils.sdpa_mask = sdpa_mask_no_vmap
+
+    mask_fns = (
+        "create_causal_mask",
+        "create_sliding_window_causal_mask",
+        "create_bidirectional_mask",
+        "create_chunked_causal_mask",
+    )
+    for name in mask_fns:
+        if not hasattr(masking_utils, name):
+            continue
+        setattr(masking_utils, name, _wrap_mask_fn_for_torch25(getattr(masking_utils, name), masking_utils))
+
     masking_utils._gemma3_torch25_mask_patch = True
+
+
+def _wrap_mask_fn_for_torch25(orig_fn: Callable, masking_utils) -> Callable:
+    def wrapped(*args, **kwargs):
+        if not _torch_lt_2_6():
+            return orig_fn(*args, **kwargs)
+        old_flag = masking_utils._is_torch_greater_or_equal_than_2_6
+        masking_utils._is_torch_greater_or_equal_than_2_6 = True
+        try:
+            return orig_fn(*args, **kwargs)
+        finally:
+            masking_utils._is_torch_greater_or_equal_than_2_6 = old_flag
+
+    return wrapped
+
+
+def _patch_gemma3_generate_masks() -> None:
+    """Prefer `block_sequence_ids` over `or_mask_function` when transformers supports it."""
+    if not _torch_lt_2_6():
+        return
+    try:
+        import transformers.masking_utils as masking_utils
+        from transformers.models.gemma3.modular_gemma3 import Gemma3ForConditionalGeneration
+    except ImportError:
+        return
+    if getattr(Gemma3ForConditionalGeneration, "_gemma3_torch25_mask_patch", False):
+        return
+    if "block_sequence_ids" not in inspect.signature(masking_utils.create_causal_mask).parameters:
+        return
+
+    @staticmethod
+    def create_masks_for_generate_patched(
+        config,
+        inputs_embeds,
+        attention_mask,
+        past_key_values,
+        position_ids=None,
+        token_type_ids=None,
+        is_first_iteration=False,
+        **kwargs,
+    ):
+        mask_kwargs = {
+            "config": config.get_text_config(),
+            "inputs_embeds": inputs_embeds,
+            "attention_mask": attention_mask,
+            "past_key_values": past_key_values,
+            "position_ids": position_ids,
+        }
+        if token_type_ids is not None:
+            mask_kwargs["block_sequence_ids"] = _block_sequence_ids_from_token_type_ids(
+                token_type_ids, inputs_embeds.device
+            )
+        return masking_utils.create_masks_for_generate(**mask_kwargs)
+
+    Gemma3ForConditionalGeneration.create_masks_for_generate = create_masks_for_generate_patched
+    Gemma3ForConditionalGeneration._gemma3_torch25_mask_patch = True
+
+    try:
+        import transformers.models.gemma3.modular_gemma3 as g3_mod
+    except ImportError:
+        return
+
+    def create_causal_mask_mapping_patched(
+        config,
+        inputs_embeds,
+        attention_mask,
+        past_key_values,
+        position_ids=None,
+        token_type_ids=None,
+        **kwargs,
+    ):
+        mask_kwargs = {
+            "config": config.get_text_config(),
+            "inputs_embeds": inputs_embeds,
+            "attention_mask": attention_mask,
+            "past_key_values": past_key_values,
+            "position_ids": position_ids,
+        }
+        if token_type_ids is not None:
+            mask_kwargs["block_sequence_ids"] = _block_sequence_ids_from_token_type_ids(
+                token_type_ids, inputs_embeds.device
+            )
+        return masking_utils.create_masks_for_generate(**mask_kwargs)
+
+    g3_mod.create_causal_mask_mapping = create_causal_mask_mapping_patched
 
 
 def _disable_sliding_attention(model) -> None:
@@ -92,6 +208,7 @@ def load_gemma3(
     multimodal generation does not require torch 2.6 mask combinators.
     """
     _patch_masking_utils_for_torch25()
+    _patch_gemma3_generate_masks()
 
     from transformers import Gemma3ForConditionalGeneration, AutoProcessor
 
