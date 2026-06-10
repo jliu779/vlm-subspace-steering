@@ -17,6 +17,57 @@ import torch
 from PIL import Image
 
 
+def _torch_lt_2_6() -> bool:
+    major, minor, *_ = (int(x) for x in torch.__version__.split("+")[0].split(".")[:3])
+    return (major, minor) < (2, 6)
+
+
+def _patch_masking_utils_for_torch25() -> None:
+    """Allow Gemma3 multimodal masks on torch 2.5.x.
+
+    transformers>=5.x gates `or_mask_function` / `and_mask_function` behind
+    torch>=2.6 even though eager attention on 2.5 can materialize the same 4D
+    masks via vmap. Gemma3 always hits this path for image token_type_ids.
+    """
+    if not _torch_lt_2_6():
+        return
+    try:
+        import transformers.masking_utils as masking_utils
+    except ImportError:
+        return
+    if getattr(masking_utils, "_gemma3_torch25_mask_patch", False):
+        return
+    masking_utils._is_torch_greater_or_equal_than_2_6 = True
+    masking_utils._gemma3_torch25_mask_patch = True
+
+
+def _disable_sliding_attention(model) -> None:
+    """Force full attention only — sliding-window masks share the same torch gate."""
+    text_cfg = getattr(model.config, "text_config", None)
+    if text_cfg is None:
+        return
+    n = getattr(text_cfg, "num_hidden_layers", 0)
+    if getattr(text_cfg, "sliding_window", None) is not None:
+        text_cfg.sliding_window = None
+    if getattr(text_cfg, "layer_types", None):
+        text_cfg.layer_types = ["full_attention"] * n
+
+    try:
+        layers = model.model.language_model.layers
+    except AttributeError:
+        return
+    for layer in layers:
+        if hasattr(layer, "layer_type"):
+            layer.layer_type = "full_attention"
+        attn = getattr(layer, "self_attn", None)
+        if attn is None:
+            continue
+        if hasattr(attn, "is_sliding"):
+            attn.is_sliding = False
+        if hasattr(attn, "sliding_window"):
+            attn.sliding_window = None
+
+
 def make_blank_pil(size: int = 896, color: Tuple[int, int, int] = (255, 255, 255)) -> Image.Image:
     return Image.new("RGB", (size, size), color=color)
 
@@ -36,10 +87,12 @@ def load_gemma3(
 ):
     """Load Gemma-3-4B-IT via Gemma3ForConditionalGeneration + AutoProcessor.
 
-    `attn_implementation="eager"` avoids flash-attn dependency. Defensive
-    sliding_window=None on the text_config to mirror the Phi-3.5-V fix in case
-    transformers' cache router mis-routes Gemma-3.
+    `attn_implementation="eager"` avoids flash-attn dependency. On torch<2.6 we
+    patch transformers masking_utils and disable sliding-window layers so
+    multimodal generation does not require torch 2.6 mask combinators.
     """
+    _patch_masking_utils_for_torch25()
+
     from transformers import Gemma3ForConditionalGeneration, AutoProcessor
 
     model = Gemma3ForConditionalGeneration.from_pretrained(
@@ -48,6 +101,8 @@ def load_gemma3(
         device_map=device_map,
         attn_implementation=attn_implementation,
     ).eval()
+    if _torch_lt_2_6():
+        _disable_sliding_attention(model)
     processor = AutoProcessor.from_pretrained(model_path)
     return model, processor
 
