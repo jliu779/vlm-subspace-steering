@@ -11,7 +11,6 @@ so the existing fit + hook scripts can reuse it:
 """
 from __future__ import annotations
 
-import inspect
 from typing import Callable, Tuple
 
 import torch
@@ -22,6 +21,10 @@ from PIL import Image
 def _torch_lt_2_6() -> bool:
     major, minor, *_ = (int(x) for x in torch.__version__.split("+")[0].split(".")[:3])
     return (major, minor) < (2, 6)
+
+
+def _as_int(x) -> int:
+    return int(x.item()) if isinstance(x, torch.Tensor) else int(x)
 
 
 def _block_sequence_ids_from_token_type_ids(
@@ -35,13 +38,129 @@ def _block_sequence_ids_from_token_type_ids(
     return torch.where(is_image, group_ids, -1)
 
 
-def _patch_masking_utils_for_torch25() -> None:
-    """Run Gemma3 image masks on torch 2.5 without vmap.
+def _materialize_eager_attn_mask(
+    batch_size: int,
+    q_length: int,
+    kv_length: int,
+    q_offset: int,
+    kv_offset: int,
+    dtype: torch.dtype,
+    device: torch.device,
+    attention_mask_2d: torch.Tensor | None = None,
+    block_sequence_ids: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Build (B, 1, Q, K) eager mask: 0 = attend, dtype.min = mask out."""
+    q_pos = torch.arange(q_length, device=device) + q_offset
+    kv_pos = torch.arange(kv_length, device=device) + kv_offset
+    causal = kv_pos.view(1, -1) <= q_pos.view(-1, 1)
+    bool_mask = causal.view(1, 1, q_length, kv_length).expand(batch_size, 1, q_length, kv_length).clone()
 
-    transformers>=5.7 routes Gemma3 `token_type_ids` through `or_mask_function`,
-    which is gated to torch>=2.6 and defaults to `use_vmap=True`. The mask
-    functions are index/tensor-based and work with the non-vmap broadcast path.
-    """
+    if block_sequence_ids is not None:
+        seq_len = block_sequence_ids.shape[-1]
+        q_clamped = q_pos.clamp(max=max(seq_len - 1, 0))
+        kv_clamped = kv_pos.clamp(max=max(seq_len - 1, 0))
+        q_group = block_sequence_ids[:, q_clamped]
+        kv_group = block_sequence_ids[:, kv_clamped]
+        q_group = torch.where(q_pos.unsqueeze(0) < seq_len, q_group, -1)
+        kv_group = torch.where(kv_pos.unsqueeze(0) < seq_len, kv_group, -1)
+        block_bidir = (q_group.unsqueeze(2) == kv_group.unsqueeze(1)) & (q_group.unsqueeze(2) >= 0)
+        bool_mask = bool_mask | block_bidir.unsqueeze(1)
+
+    if attention_mask_2d is not None:
+        pad = attention_mask_2d.to(device=device)
+        if pad.shape[-1] < kv_length:
+            pad = F.pad(pad, (0, kv_length - pad.shape[-1]), value=0)
+        elif pad.shape[-1] > kv_length:
+            pad = pad[..., :kv_length]
+        bool_mask = bool_mask & pad[:, None, None, :].to(dtype=torch.bool)
+
+    min_dtype = torch.finfo(dtype).min
+    return torch.where(bool_mask, torch.zeros((), device=device, dtype=dtype), min_dtype)
+
+
+def _infer_mask_geometry(masking_utils, config, inputs_embeds, attention_mask, past_key_values, position_ids):
+    layer_idx = 0
+    if hasattr(masking_utils, "_preprocess_mask_arguments"):
+        early_exit, attention_mask, _, q_length, kv_length, q_offset, kv_offset = (
+            masking_utils._preprocess_mask_arguments(
+                config, inputs_embeds, attention_mask, past_key_values, position_ids, layer_idx
+            )
+        )
+        if early_exit:
+            return True, attention_mask, None, None, None, None
+        return False, attention_mask, q_length, kv_length, _as_int(q_offset), _as_int(kv_offset)
+
+    q_length = inputs_embeds.shape[1]
+    if past_key_values is not None:
+        q_offset = _as_int(past_key_values.get_seq_length())
+        kv_length, kv_offset = past_key_values.get_mask_sizes(q_length, layer_idx)
+        kv_length, kv_offset = _as_int(kv_length), _as_int(kv_offset)
+    elif attention_mask is not None:
+        q_offset, kv_length, kv_offset = 0, attention_mask.shape[-1], 0
+    else:
+        q_offset, kv_length, kv_offset = 0, q_length, 0
+    return False, attention_mask, q_length, kv_length, q_offset, kv_offset
+
+
+def _create_causal_mask_torch25(masking_utils, orig_fn: Callable, **kwargs):
+    """Pure-tensor causal (+ optional image block) mask; never uses vmap."""
+    config = kwargs.get("config")
+    inputs_embeds = kwargs.get("inputs_embeds")
+    if inputs_embeds is None:
+        inputs_embeds = kwargs.get("input_embeds")
+    attention_mask = kwargs.get("attention_mask")
+    past_key_values = kwargs.get("past_key_values")
+    position_ids = kwargs.get("position_ids")
+    block_sequence_ids = kwargs.get("block_sequence_ids")
+
+    if isinstance(attention_mask, torch.Tensor) and attention_mask.ndim == 4:
+        return attention_mask
+
+    early_exit, attention_mask, q_length, kv_length, q_offset, kv_offset = _infer_mask_geometry(
+        masking_utils, config, inputs_embeds, attention_mask, past_key_values, position_ids
+    )
+    if early_exit:
+        return attention_mask
+
+    batch_size = inputs_embeds.shape[0]
+    attn_2d = attention_mask if attention_mask is not None and attention_mask.ndim == 2 else None
+    return _materialize_eager_attn_mask(
+        batch_size=batch_size,
+        q_length=q_length,
+        kv_length=kv_length,
+        q_offset=q_offset,
+        kv_offset=kv_offset,
+        dtype=inputs_embeds.dtype,
+        device=inputs_embeds.device,
+        attention_mask_2d=attn_2d,
+        block_sequence_ids=block_sequence_ids,
+    )
+
+
+def _create_masks_for_generate_torch25(masking_utils, config, inputs_embeds, attention_mask, past_key_values, **kwargs):
+    effective_config = config.get_text_config() if hasattr(config, "get_text_config") else config
+    position_ids = kwargs.get("position_ids")
+    block_sequence_ids = kwargs.get("block_sequence_ids")
+    base = dict(
+        config=effective_config,
+        inputs_embeds=inputs_embeds,
+        attention_mask=attention_mask,
+        past_key_values=past_key_values,
+        position_ids=position_ids,
+        block_sequence_ids=block_sequence_ids,
+    )
+    if hasattr(effective_config, "layer_types"):
+        return {
+            layer_pattern: masking_utils.create_causal_mask(**base)
+            for layer_pattern in set(effective_config.layer_types)
+        }
+    if getattr(effective_config, "sliding_window", None) is not None:
+        return masking_utils.create_sliding_window_causal_mask(**base)
+    return masking_utils.create_causal_mask(**base)
+
+
+def _patch_masking_utils_for_torch25() -> None:
+    """Replace transformers mask builders on torch 2.5 — bypass vmap entirely."""
     if not _torch_lt_2_6():
         return
     try:
@@ -51,54 +170,57 @@ def _patch_masking_utils_for_torch25() -> None:
     if getattr(masking_utils, "_gemma3_torch25_mask_patch", False):
         return
 
-    orig_sdpa_mask = masking_utils.sdpa_mask
+    orig_create_causal = masking_utils.create_causal_mask
+    orig_create_sliding = getattr(masking_utils, "create_sliding_window_causal_mask", None)
+    orig_create_masks = masking_utils.create_masks_for_generate
 
-    def sdpa_mask_no_vmap(*args, use_vmap: bool = False, **kwargs):
-        return orig_sdpa_mask(*args, use_vmap=False, **kwargs)
+    def create_causal_mask_patched(**kwargs):
+        return _create_causal_mask_torch25(masking_utils, orig_create_causal, **kwargs)
 
-    masking_utils.sdpa_mask = sdpa_mask_no_vmap
+    def create_sliding_window_causal_mask_patched(**kwargs):
+        # Sliding layers are disabled for Gemma3 on torch 2.5; reuse full causal mask.
+        return create_causal_mask_patched(**kwargs)
 
-    mask_fns = (
-        "create_causal_mask",
-        "create_sliding_window_causal_mask",
-        "create_bidirectional_mask",
-        "create_chunked_causal_mask",
-    )
-    for name in mask_fns:
-        if not hasattr(masking_utils, name):
-            continue
-        setattr(masking_utils, name, _wrap_mask_fn_for_torch25(getattr(masking_utils, name), masking_utils))
+    def create_masks_for_generate_patched(config, inputs_embeds, attention_mask, past_key_values, **kwargs):
+        kwargs.pop("or_mask_function", None)
+        kwargs.pop("and_mask_function", None)
+        return _create_masks_for_generate_torch25(
+            masking_utils, config, inputs_embeds, attention_mask, past_key_values, **kwargs
+        )
 
+    masking_utils.create_causal_mask = create_causal_mask_patched
+    if orig_create_sliding is not None:
+        masking_utils.create_sliding_window_causal_mask = create_sliding_window_causal_mask_patched
+    masking_utils.create_masks_for_generate = create_masks_for_generate_patched
     masking_utils._gemma3_torch25_mask_patch = True
 
 
-def _wrap_mask_fn_for_torch25(orig_fn: Callable, masking_utils) -> Callable:
-    def wrapped(*args, **kwargs):
-        if not _torch_lt_2_6():
-            return orig_fn(*args, **kwargs)
-        old_flag = masking_utils._is_torch_greater_or_equal_than_2_6
-        masking_utils._is_torch_greater_or_equal_than_2_6 = True
-        try:
-            return orig_fn(*args, **kwargs)
-        finally:
-            masking_utils._is_torch_greater_or_equal_than_2_6 = old_flag
-
-    return wrapped
-
-
-def _patch_gemma3_generate_masks() -> None:
-    """Prefer `block_sequence_ids` over `or_mask_function` when transformers supports it."""
+def _patch_gemma3_mask_entrypoints() -> None:
+    """Route Gemma3 image masks through block_sequence_ids + tensor mask builder."""
     if not _torch_lt_2_6():
         return
     try:
         import transformers.masking_utils as masking_utils
         from transformers.models.gemma3.modular_gemma3 import Gemma3ForConditionalGeneration
+        import transformers.models.gemma3.modular_gemma3 as g3_mod
     except ImportError:
         return
-    if getattr(Gemma3ForConditionalGeneration, "_gemma3_torch25_mask_patch", False):
+    if getattr(g3_mod, "_gemma3_torch25_mask_patch", False):
         return
-    if "block_sequence_ids" not in inspect.signature(masking_utils.create_causal_mask).parameters:
-        return
+
+    def _mask_kwargs_from_token_types(config, inputs_embeds, attention_mask, past_key_values, position_ids, token_type_ids):
+        mask_kwargs = {
+            "config": config.get_text_config(),
+            "inputs_embeds": inputs_embeds,
+            "attention_mask": attention_mask,
+            "past_key_values": past_key_values,
+            "position_ids": position_ids,
+        }
+        if token_type_ids is not None:
+            mask_kwargs["block_sequence_ids"] = _block_sequence_ids_from_token_type_ids(
+                token_type_ids, inputs_embeds.device
+            )
+        return mask_kwargs
 
     @staticmethod
     def create_masks_for_generate_patched(
@@ -111,26 +233,10 @@ def _patch_gemma3_generate_masks() -> None:
         is_first_iteration=False,
         **kwargs,
     ):
-        mask_kwargs = {
-            "config": config.get_text_config(),
-            "inputs_embeds": inputs_embeds,
-            "attention_mask": attention_mask,
-            "past_key_values": past_key_values,
-            "position_ids": position_ids,
-        }
-        if token_type_ids is not None:
-            mask_kwargs["block_sequence_ids"] = _block_sequence_ids_from_token_type_ids(
-                token_type_ids, inputs_embeds.device
-            )
+        mask_kwargs = _mask_kwargs_from_token_types(
+            config, inputs_embeds, attention_mask, past_key_values, position_ids, token_type_ids
+        )
         return masking_utils.create_masks_for_generate(**mask_kwargs)
-
-    Gemma3ForConditionalGeneration.create_masks_for_generate = create_masks_for_generate_patched
-    Gemma3ForConditionalGeneration._gemma3_torch25_mask_patch = True
-
-    try:
-        import transformers.models.gemma3.modular_gemma3 as g3_mod
-    except ImportError:
-        return
 
     def create_causal_mask_mapping_patched(
         config,
@@ -141,24 +247,35 @@ def _patch_gemma3_generate_masks() -> None:
         token_type_ids=None,
         **kwargs,
     ):
-        mask_kwargs = {
-            "config": config.get_text_config(),
-            "inputs_embeds": inputs_embeds,
-            "attention_mask": attention_mask,
-            "past_key_values": past_key_values,
-            "position_ids": position_ids,
-        }
-        if token_type_ids is not None:
-            mask_kwargs["block_sequence_ids"] = _block_sequence_ids_from_token_type_ids(
-                token_type_ids, inputs_embeds.device
-            )
+        mask_kwargs = _mask_kwargs_from_token_types(
+            config, inputs_embeds, attention_mask, past_key_values, position_ids, token_type_ids
+        )
         return masking_utils.create_masks_for_generate(**mask_kwargs)
 
+    Gemma3ForConditionalGeneration.create_masks_for_generate = create_masks_for_generate_patched
     g3_mod.create_causal_mask_mapping = create_causal_mask_mapping_patched
+    # modeling code imports these names at module load; rebind to patched helpers.
+    g3_mod.create_causal_mask = masking_utils.create_causal_mask
+    g3_mod.create_masks_for_generate = masking_utils.create_masks_for_generate
+    if hasattr(g3_mod, "create_sliding_window_causal_mask"):
+        g3_mod.create_sliding_window_causal_mask = masking_utils.create_sliding_window_causal_mask
+
+    try:
+        import transformers.models.gemma3.modeling_gemma3 as g3_modeling
+        g3_modeling.create_causal_mask = masking_utils.create_causal_mask
+        g3_modeling.create_masks_for_generate = masking_utils.create_masks_for_generate
+        if hasattr(g3_modeling, "create_sliding_window_causal_mask"):
+            g3_modeling.create_sliding_window_causal_mask = masking_utils.create_sliding_window_causal_mask
+        if hasattr(g3_modeling, "create_causal_mask_mapping"):
+            g3_modeling.create_causal_mask_mapping = create_causal_mask_mapping_patched
+    except ImportError:
+        pass
+
+    g3_mod._gemma3_torch25_mask_patch = True
 
 
 def _disable_sliding_attention(model) -> None:
-    """Force full attention only — sliding-window masks share the same torch gate."""
+    """Force full attention only on torch 2.5."""
     text_cfg = getattr(model.config, "text_config", None)
     if text_cfg is None:
         return
@@ -203,12 +320,11 @@ def load_gemma3(
 ):
     """Load Gemma-3-4B-IT via Gemma3ForConditionalGeneration + AutoProcessor.
 
-    `attn_implementation="eager"` avoids flash-attn dependency. On torch<2.6 we
-    patch transformers masking_utils and disable sliding-window layers so
-    multimodal generation does not require torch 2.6 mask combinators.
+    On torch<2.6, replaces transformers mask construction with pure tensor ops
+    so Gemma3 multimodal generation does not require torch 2.6 vmap support.
     """
     _patch_masking_utils_for_torch25()
-    _patch_gemma3_generate_masks()
+    _patch_gemma3_mask_entrypoints()
 
     from transformers import Gemma3ForConditionalGeneration, AutoProcessor
 
