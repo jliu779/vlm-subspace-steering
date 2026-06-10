@@ -22,7 +22,6 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 VENV="${VENV:-python3}"                          # e.g. /path/to/.venv/bin/python
 MODEL_PATH="${MODEL_PATH:-}"                      # optional override for --model_path
 JUDGE_CFG="${JUDGE_CFG:-}"                        # optional override; default: eval/configs/judge_default.yaml
-VLM_CFG="${VLM_CFG:-}"                            # required only for llava15 baseline
 LIMIT="${LIMIT:-}"                                # optional smoke test, e.g. LIMIT=5
 SKIP_GEN="${SKIP_GEN:-0}"
 SKIP_JUDGE="${SKIP_JUDGE:-0}"
@@ -73,31 +72,17 @@ run_gen() {
   fi
 
   log "RUN gen $stem (max_new_tokens=$max_tokens)"
-  if [[ "$VLM" == "llava15" ]]; then
-    if [[ -z "$VLM_CFG" ]]; then
-      echo "ERROR: llava15 baseline requires VLM_CFG=/path/to/llava15.yaml" >&2
-      exit 1
-    fi
-    CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" "$VENV" "$BASELINE_SCRIPT" \
-      --config "$VLM_CFG" \
-      --manifest "$manifest" \
-      --modes orig \
-      --max_new_tokens "$max_tokens" \
-      --out "$out" \
-      "${extra[@]}"
-  else
-    local model_args=()
-    if [[ -n "$MODEL_PATH" ]]; then
-      model_args+=(--model_path "$MODEL_PATH")
-    fi
-    CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" "$VENV" "$BASELINE_SCRIPT" \
-      --manifest "$manifest" \
-      --mode orig \
-      --max_new_tokens "$max_tokens" \
-      --out "$out" \
-      "${model_args[@]}" \
-      "${extra[@]}"
+  local model_args=()
+  if [[ -n "$MODEL_PATH" ]]; then
+    model_args+=(--model_path "$MODEL_PATH")
   fi
+  CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" "$VENV" "$BASELINE_SCRIPT" \
+    --manifest "$manifest" \
+    --mode orig \
+    --max_new_tokens "$max_tokens" \
+    --out "$out" \
+    "${model_args[@]}" \
+    "${extra[@]}"
 }
 
 run_actionable_judge() {
