@@ -1,0 +1,15 @@
+# LLaVA-1.5-7B baseline config for eval/baseline/llava15_baseline.py
+# Edit model_root / target_model_id to match your server.
+model:
+  target_model_id: llava-hf/llava-1.5-7b-hf
+  judge_model_id: meta-llama/Meta-Llama-3.1-8B-Instruct
+  dtype: float16
+  device_map: auto
+  trust_remote_code: false
+
+paths:
+  model_root: /hub/huggingface/models
+
+generation:
+  max_new_tokens: 256
+  do_sample: false
