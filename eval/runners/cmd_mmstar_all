@@ -1,0 +1,3 @@
+conda activate venv_neurostrike
+cd /home/jingliu/workspece/vlm-subspace/vlm-subspace-steering
+CUDA_VISIBLE_DEVICES=0 bash eval/runners/run_mmstar_all.sh

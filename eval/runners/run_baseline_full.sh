@@ -145,22 +145,24 @@ run_over_refusal_judge() {
     --out "$judged"
 }
 
-run_sciqa_score() {
-  local stem="scienceqa_imgval_n200"
+run_mcq_score() {
+  local stem="$1"
+  local manifest="$2"
+  local csv_name="${3:-${stem}_score.csv}"
   local gen="$OUT_DIR/${stem}.jsonl"
-  local csv="$OUT_DIR/sciqa_score.csv"
+  local csv="$OUT_DIR/${csv_name}"
   if [[ ! -f "$gen" ]]; then
-    log "SKIP sciqa score (missing generation)"
+    log "SKIP mcq score $stem (missing generation)"
     return 0
   fi
   if [[ -f "$csv" && -s "$csv" ]]; then
-    log "SKIP sciqa score (exists)"
+    log "SKIP mcq score $stem (exists)"
     return 0
   fi
-  log "RUN sciqa score (CPU)"
+  log "RUN mcq score $stem (CPU)"
   "$VENV" "$EVAL/score/score_scienceqa.py" \
     --generations "$gen" \
-    --manifest "$DATA/manifests/scienceqa_imgval_n200.jsonl" \
+    --manifest "$manifest" \
     --out "$csv"
 }
 
@@ -177,6 +179,7 @@ if [[ "$SKIP_GEN" != "1" ]]; then
   run_gen "siuo_167"                 "$DATA/manifests/siuo_167.jsonl"                 192
   run_gen "mssbench_unsafe_full"     "$DATA/manifests/mssbench_unsafe_full.jsonl"     192
   run_gen "scienceqa_imgval_n200"    "$DATA/manifests/scienceqa_imgval_n200.jsonl"    192
+  run_gen "mmstar"                   "$DATA/manifests/mmstar.jsonl"                   192
   run_gen "benign_multimodal_n60"    "$DATA/manifests/benign_multimodal_n60.jsonl"    192
 else
   log "SKIP_GEN=1, generation phase skipped"
@@ -190,7 +193,8 @@ if [[ "$SKIP_JUDGE" != "1" ]]; then
   run_context_judge "siuo_167" "$DATA/manifests/siuo_167.jsonl"
   run_context_judge "mssbench_unsafe_full" "$DATA/manifests/mssbench_unsafe_full.jsonl"
   run_over_refusal_judge
-  run_sciqa_score
+  run_mcq_score "scienceqa_imgval_n200" "$DATA/manifests/scienceqa_imgval_n200.jsonl" "sciqa_score.csv"
+  run_mcq_score "mmstar" "$DATA/manifests/mmstar.jsonl" "mmstar_score.csv"
 
   SUMMARY_MD="$OUT_DIR/baseline_summary.md"
   "$VENV" "$EVAL/aggregate/summarize_baseline_metrics.py" \

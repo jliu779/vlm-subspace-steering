@@ -51,14 +51,15 @@ def main() -> None:
 
     out_dir = Path(args.out_dir)
     benches = [
-        ("Cell A", "vlsafe_examine_eval", "actionable"),
-        ("Cell B", "spa_vl_test_530", "actionable"),
-        ("Cell C/sdtypo", "mmsb_vision_risk_sdtypo", "actionable"),
-        ("Cell C/MMSB", "mm_safetybench_300", "actionable"),
-        ("Cell D/SIUO", "siuo_167", "context"),
-        ("Cell D/MSSB", "mssbench_unsafe_full", "context"),
-        ("Utility sciqa", "scienceqa_imgval_n200", "sciqa"),
-        ("Utility OR", "benign_multimodal_n60", "over_refusal"),
+        ("Cell A", "vlsafe_examine_eval", "actionable", None),
+        ("Cell B", "spa_vl_test_530", "actionable", None),
+        ("Cell C/sdtypo", "mmsb_vision_risk_sdtypo", "actionable", None),
+        ("Cell C/MMSB", "mm_safetybench_300", "actionable", None),
+        ("Cell D/SIUO", "siuo_167", "context", None),
+        ("Cell D/MSSB", "mssbench_unsafe_full", "context", None),
+        ("Utility sciqa", "scienceqa_imgval_n200", "sciqa", "sciqa_score.csv"),
+        ("Utility MMStar", "mmstar", "sciqa", "mmstar_score.csv"),
+        ("Utility OR", "benign_multimodal_n60", "over_refusal", None),
     ]
 
     lines = [
@@ -68,10 +69,10 @@ def main() -> None:
         "|---|---|---|",
     ]
 
-    for label, stem, kind in benches:
+    for label, stem, kind, score_csv in benches:
         if kind == "sciqa":
-            val = read_sciqa_csv(out_dir / "sciqa_score.csv")
-            lines.append(f"| {label} | sciqa% | {val} |")
+            val = read_sciqa_csv(out_dir / score_csv)
+            lines.append(f"| {label} | acc% | {val} |")
             continue
 
         judged = out_dir / f"{stem}.judged.jsonl"
