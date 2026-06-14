@@ -42,6 +42,18 @@ def read_sciqa_csv(path: Path) -> str:
     return f"{float(acc) * 100:.2f}%" if acc is not None else "N/A"
 
 
+def read_mathvista_csv(path: Path) -> str:
+    if not path.exists():
+        return "N/A"
+    with path.open("r", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    for row in rows:
+        if row.get("split") == "all":
+            acc = row.get("accuracy")
+            return f"{float(acc) * 100:.2f}%" if acc is not None else "N/A"
+    return "N/A"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--out_dir", required=True, help="e.g. outputs/qwen25vl_baseline")
@@ -57,9 +69,15 @@ def main() -> None:
         ("Cell C/MMSB", "mm_safetybench_300", "actionable", None),
         ("Cell D/SIUO", "siuo_167", "context", None),
         ("Cell D/MSSB", "mssbench_unsafe_full", "context", None),
-        ("Utility sciqa", "scienceqa_imgval_n200", "sciqa", "sciqa_score.csv"),
+        ("Utility sciqa n200", "scienceqa_imgval_n200", "sciqa", "sciqa_n200_score.csv"),
+        ("Utility sciqa full", "scienceqa_imgval_full", "sciqa", "sciqa_full_score.csv"),
         ("Utility MMStar", "mmstar", "sciqa", "mmstar_score.csv"),
+        ("Utility MME-RW", "mme_realworld", "sciqa", "mme_realworld_score.csv"),
+        ("Utility MathVista", "mathvista", "mathvista", "mathvista_score.csv"),
+        ("Utility ColorBench", "colorbench", "mathvista", "colorbench_score.csv"),
         ("Utility OR", "benign_multimodal_n60", "over_refusal", None),
+        ("Utility MOSSBench OR", "mossbench", "over_refusal", None),
+        ("Utility XSTest OR", "xstest_safe", "over_refusal", None),
     ]
 
     lines = [
@@ -72,6 +90,10 @@ def main() -> None:
     for label, stem, kind, score_csv in benches:
         if kind == "sciqa":
             val = read_sciqa_csv(out_dir / score_csv)
+            lines.append(f"| {label} | acc% | {val} |")
+            continue
+        if kind == "mathvista":
+            val = read_mathvista_csv(out_dir / score_csv)
             lines.append(f"| {label} | acc% | {val} |")
             continue
 

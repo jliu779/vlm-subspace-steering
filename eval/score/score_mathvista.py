@@ -84,7 +84,7 @@ def main():
         if g is None: continue
         resp = r.get("response", "") or r.get("generation", "")
         qt = g["qt"] or ("multiple_choice" if g["letter"] else "free_form")
-        if qt == "multiple_choice":
+        if qt in ("multiple_choice", "multi_choice"):
             pred = first_letter(resp); ok = (pred is not None and pred == g["letter"])
             if pred is None: pe += 1
         else:
