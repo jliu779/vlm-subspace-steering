@@ -307,7 +307,6 @@ run_colorbench_score() {
 }
 
 run_cpu_scores() {
-  run_mcq_score "scienceqa_imgval_n200" "$DATA/manifests/scienceqa_imgval_n200.jsonl" "sciqa_n200_score.csv"
   run_mcq_score "scienceqa_imgval_full" "$DATA/manifests/scienceqa_imgval_full.jsonl" "sciqa_full_score.csv"
   run_mcq_score "mmstar" "$DATA/manifests/mmstar.jsonl" "mmstar_score.csv"
   run_mcq_score "mme_realworld" "$DATA/manifests/mme_realworld.jsonl" "mme_realworld_score.csv"
@@ -341,7 +340,6 @@ if [[ "$SKIP_GEN" != "1" ]]; then
     run_gen_and_maybe_judge "mm_safetybench_300"       "$DATA/manifests/mm_safetybench_300.jsonl"       192
     run_gen_and_maybe_judge "siuo_167"                 "$DATA/manifests/siuo_167.jsonl"                 192
     run_gen_and_maybe_judge "mssbench_unsafe_full"     "$DATA/manifests/mssbench_unsafe_full.jsonl"     192
-    run_gen "scienceqa_imgval_n200"    "$DATA/manifests/scienceqa_imgval_n200.jsonl"    192
     run_gen "scienceqa_imgval_full"    "$DATA/manifests/scienceqa_imgval_full.jsonl"    192
     run_gen "mmstar"                   "$DATA/manifests/mmstar.jsonl"                   192
     run_gen "mme_realworld"            "$DATA/manifests/mme_realworld.jsonl"            192
@@ -358,7 +356,6 @@ if [[ "$SKIP_GEN" != "1" ]]; then
     run_gen "mm_safetybench_300"       "$DATA/manifests/mm_safetybench_300.jsonl"       192
     run_gen "siuo_167"                 "$DATA/manifests/siuo_167.jsonl"                 192
     run_gen "mssbench_unsafe_full"     "$DATA/manifests/mssbench_unsafe_full.jsonl"     192
-    run_gen "scienceqa_imgval_n200"    "$DATA/manifests/scienceqa_imgval_n200.jsonl"    192
     run_gen "scienceqa_imgval_full"    "$DATA/manifests/scienceqa_imgval_full.jsonl"    192
     run_gen "mmstar"                   "$DATA/manifests/mmstar.jsonl"                   192
     run_gen "mme_realworld"            "$DATA/manifests/mme_realworld.jsonl"            192

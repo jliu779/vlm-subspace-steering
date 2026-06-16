@@ -69,7 +69,6 @@ def main() -> None:
         ("Cell C/MMSB", "mm_safetybench_300", "actionable", None),
         ("Cell D/SIUO", "siuo_167", "context", None),
         ("Cell D/MSSB", "mssbench_unsafe_full", "context", None),
-        ("Utility sciqa n200", "scienceqa_imgval_n200", "sciqa", "sciqa_n200_score.csv"),
         ("Utility sciqa full", "scienceqa_imgval_full", "sciqa", "sciqa_full_score.csv"),
         ("Utility MMStar", "mmstar", "sciqa", "mmstar_score.csv"),
         ("Utility MME-RW", "mme_realworld", "sciqa", "mme_realworld_score.csv"),
