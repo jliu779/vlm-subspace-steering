@@ -1,32 +1,37 @@
 #!/usr/bin/env bash
-# Run full baseline pipeline for one VLM:
-#   generate -> judge/score -> summary markdown
+# Full Procrustes-MPC pipeline for one VLM (all 14 benchmarks):
+#   generate (with steering hooks) -> judge/score -> summary markdown
 #
-# Default: dual-GPU pipeline (DUAL_GPU=1)
+# Default steering: refp α=0.2, λ=1 (paper §5 picked config).
+# Other modes: MODE=lambda0 | lambda1_full
+#
+# Dual-GPU pipeline (DUAL_GPU=1, default):
 #   GPU 0 (CUDA_VISIBLE_DEVICES): VLM generation
-#   GPU 1 (JUDGE_GPU): Llama judge (runs in background while next gen proceeds)
+#   GPU 1 (JUDGE_GPU): Llama judge (background while next gen runs)
 #
 # Usage:
-#   bash eval/runners/run_baseline_full.sh
-#   VLM=qwen25vl MODEL_PATH=/hub/.../Qwen2.5-VL-7B-Instruct bash eval/runners/run_baseline_full.sh
-#   VLM=qwen25vl LIMIT=5 bash eval/runners/run_baseline_full.sh
-#   SKIP_GEN=1 bash eval/runners/run_baseline_full.sh
-#   SKIP_JUDGE=1 bash eval/runners/run_baseline_full.sh
-#   DUAL_GPU=0 bash eval/runners/run_baseline_full.sh   # single-GPU sequential
+#   bash eval/runners/run_procrustes_full.sh
+#   VLM=qwen25vl MODEL_PATH=/hub/.../Qwen2.5-VL-7B-Instruct bash eval/runners/run_procrustes_full.sh
+#   MODE=lambda0 VLM=qwen25vl bash eval/runners/run_procrustes_full.sh
+#   VLM=qwen25vl LIMIT=5 bash eval/runners/run_procrustes_full.sh
+#   SKIP_GEN=1 / SKIP_JUDGE=1  — same as baseline runner
+#   PR_DIR=/path/to/ProcrustesRotation bash eval/runners/run_procrustes_full.sh
 #   GEN_SHARD=auto bash ...  # split large benchmarks across GPU0+GPU1 (default)
 #   GEN_SHARD=0 bash ...     # disable dual-GPU sharded generation
 set -euo pipefail
 
 # ===== CONFIG (edit these) =====
-VLM="${VLM:-qwen25vl}"                          # qwen25vl | qwen3vl | internvl | internvl3 | llava_next | llava15 | phi35v | gemma3
-CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" # VLM generation GPU
-JUDGE_GPU="${JUDGE_GPU:-1}"                     # judge GPU (default: second card)
-DUAL_GPU="${DUAL_GPU:-1}"                       # 1 = pipeline gen@GPU0 + judge@GPU1
+VLM="${VLM:-qwen25vl}"
+MODE="${MODE:-refp}"                            # refp | lambda0 | lambda1_full
+CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+JUDGE_GPU="${JUDGE_GPU:-1}"
+DUAL_GPU="${DUAL_GPU:-1}"
 GEN_SHARD="${GEN_SHARD:-auto}"                    # auto|2 = shard large manifests on both GPUs; 0 = off
 SHARD_MIN_LINES="${SHARD_MIN_LINES:-500}"         # auto-shard when manifest has >= this many lines
 VENV="${VENV:-python3}"
 MODEL_PATH="${MODEL_PATH:-}"
 JUDGE_CFG="${JUDGE_CFG:-}"
+PR_DIR="${PR_DIR:-}"
 LIMIT="${LIMIT:-}"
 SKIP_GEN="${SKIP_GEN:-0}"
 SKIP_JUDGE="${SKIP_JUDGE:-0}"
@@ -37,7 +42,16 @@ ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 EVAL="$ROOT/eval"
 DATA="$ROOT/data"
 OUT_BASE="${OUT_BASE:-$ROOT/outputs}"
-OUT_DIR="$OUT_BASE/${VLM}_baseline"
+
+if [[ -z "$PR_DIR" ]]; then
+  if [[ -d "$ROOT/ProcrustesRotation" ]]; then
+    PR_DIR="$ROOT/ProcrustesRotation"
+  elif [[ -d "$ROOT/../ProcrustesRotation" ]]; then
+    PR_DIR="$(cd "$ROOT/../ProcrustesRotation" && pwd)"
+  else
+    PR_DIR="$ROOT/ProcrustesRotation"
+  fi
+fi
 
 JUDGE_PIDS=()
 
@@ -45,25 +59,79 @@ if [[ -z "$JUDGE_CFG" ]]; then
   JUDGE_CFG="$EVAL/configs/judge_default.yaml"
 fi
 
-if [[ ! -f "$JUDGE_CFG" ]]; then
-  echo "ERROR: judge config not found: $JUDGE_CFG" >&2
-  echo "Create it or set JUDGE_CFG=/path/to/your/judge.yaml" >&2
-  exit 1
-fi
-
-BASELINE_SCRIPT="$EVAL/baseline/${VLM}_baseline.py"
-if [[ ! -f "$BASELINE_SCRIPT" ]]; then
-  echo "ERROR: unknown VLM '$VLM' (missing $BASELINE_SCRIPT)" >&2
-  echo "Supported: qwen25vl qwen3vl internvl internvl3 llava_next llava15 phi35v gemma3" >&2
-  exit 1
-fi
-
-mkdir -p "$OUT_DIR"
-
 log() { echo "[$(date +%T)] $*"; }
 
 # shellcheck source=lib_gen_shard.sh
 source "$SCRIPT_DIR/lib_gen_shard.sh"
+
+resolve_steering_mode() {
+  case "$MODE" in
+    refp)
+      ALPHA="0.2"
+      LAMBDA_MEAN="1"
+      MEAN_SHIFT_MODE="refusal_projected"
+      OUT_SUFFIX="a02_refp"
+      METHOD_LABEL="procrustes_refp_a0.2"
+      ;;
+    lambda0)
+      ALPHA="0.2"
+      LAMBDA_MEAN="0"
+      MEAN_SHIFT_MODE="full"
+      OUT_SUFFIX="a02_lambda0"
+      METHOD_LABEL="procrustes_lambda0_a0.2"
+      ;;
+    lambda1_full)
+      ALPHA="0.2"
+      LAMBDA_MEAN="1"
+      MEAN_SHIFT_MODE="full"
+      OUT_SUFFIX="a02_lambda1_full"
+      METHOD_LABEL="procrustes_lambda1_full_a0.2"
+      ;;
+    *)
+      echo "ERROR: unknown MODE='$MODE' (use refp | lambda0 | lambda1_full)" >&2
+      exit 1
+      ;;
+  esac
+}
+
+resolve_vlm_assets() {
+  local refusal_stem="$VLM"
+  case "$VLM" in
+    internvl) refusal_stem="internvl" ;;
+  esac
+
+  GENERATE_SCRIPT="$EVAL/generate/${VLM}_procrustes_generate.py"
+  PROCRUSTES_PARAMS="$PR_DIR/outputs/${VLM}_procrustes_params_k16.pt"
+  REFUSAL_DIR="$PR_DIR/outputs/refusal_dir_${refusal_stem}.pt"
+  OUT_DIR="$OUT_BASE/${VLM}_${OUT_SUFFIX}"
+  METHOD_TAG="${VLM}_${OUT_SUFFIX}"
+}
+
+preflight_check() {
+  if [[ ! -f "$JUDGE_CFG" ]]; then
+    echo "ERROR: judge config not found: $JUDGE_CFG" >&2
+    exit 1
+  fi
+  if [[ ! -f "$GENERATE_SCRIPT" ]]; then
+    echo "ERROR: unknown VLM '$VLM' (missing $GENERATE_SCRIPT)" >&2
+    echo "Supported: qwen25vl qwen3vl internvl internvl3 llava_next llava15 phi35v gemma3" >&2
+    exit 1
+  fi
+  if [[ ! -f "$PROCRUSTES_PARAMS" ]]; then
+    echo "ERROR: Procrustes params not found: $PROCRUSTES_PARAMS" >&2
+    echo "Set PR_DIR to the directory containing ProcrustesRotation/outputs/" >&2
+    exit 1
+  fi
+  if [[ "$MEAN_SHIFT_MODE" == "refusal_projected" && ! -f "$REFUSAL_DIR" ]]; then
+    echo "ERROR: refusal direction not found: $REFUSAL_DIR (required for MODE=refp)" >&2
+    exit 1
+  fi
+}
+
+resolve_steering_mode
+resolve_vlm_assets
+preflight_check
+mkdir -p "$OUT_DIR"
 
 judge_gpu() {
   if [[ "$DUAL_GPU" == "1" ]]; then
@@ -95,15 +163,30 @@ _run_gen_on_gpu() {
   if [[ -n "$LIMIT" ]]; then
     extra+=(--limit "$LIMIT")
   fi
+
+  local steer_args=(
+    --manifest "$manifest"
+    --params "$PROCRUSTES_PARAMS"
+    --alpha "$ALPHA"
+    --lambda_mean "$LAMBDA_MEAN"
+    --mean_shift_mode "$MEAN_SHIFT_MODE"
+    --hook_scope prefill_only
+    --mode orig
+    --max_new_tokens "$max_tokens"
+    --method_tag "$METHOD_TAG"
+    --out "$out"
+  )
+  if [[ "$MEAN_SHIFT_MODE" == "refusal_projected" ]]; then
+    steer_args+=(--refusal_dir "$REFUSAL_DIR")
+  fi
+
   local model_args=()
   if [[ -n "$MODEL_PATH" ]]; then
     model_args+=(--model_path "$MODEL_PATH")
   fi
-  CUDA_VISIBLE_DEVICES="$gpu" "$VENV" "$BASELINE_SCRIPT" \
-    --manifest "$manifest" \
-    --mode orig \
-    --max_new_tokens "$max_tokens" \
-    --out "$out" \
+
+  CUDA_VISIBLE_DEVICES="$gpu" "$VENV" "$GENERATE_SCRIPT" \
+    "${steer_args[@]}" \
     "${model_args[@]}" \
     "${extra[@]}"
 }
@@ -125,7 +208,7 @@ run_gen_sharded() {
   local n0 n1
   n0="$(shard_count_lines "$m0")"
   n1="$(shard_count_lines "$m1")"
-  log "RUN gen $stem SHARDED on GPU $CUDA_VISIBLE_DEVICES ($n0) + GPU $JUDGE_GPU ($n1)"
+  log "RUN gen $stem SHARDED (MODE=$MODE) on GPU $CUDA_VISIBLE_DEVICES ($n0) + GPU $JUDGE_GPU ($n1)"
 
   local pid0="" pid1=""
   if [[ ! -f "$o0" || ! -s "$o0" ]]; then
@@ -173,9 +256,9 @@ run_gen() {
   fi
 
   if [[ "$DUAL_GPU" == "1" && ${#JUDGE_PIDS[@]} -gt 0 ]]; then
-    log "RUN gen $stem on GPU $CUDA_VISIBLE_DEVICES (max_new_tokens=$max_tokens); GPU $(judge_gpu): ${#JUDGE_PIDS[@]} judge job(s) in background"
+    log "RUN gen $stem on GPU $CUDA_VISIBLE_DEVICES (Procrustes MODE=$MODE α=$ALPHA λ=$LAMBDA_MEAN); GPU $(judge_gpu): ${#JUDGE_PIDS[@]} judge job(s) in background"
   else
-    log "RUN gen $stem on GPU $CUDA_VISIBLE_DEVICES (max_new_tokens=$max_tokens)"
+    log "RUN gen $stem on GPU $CUDA_VISIBLE_DEVICES (Procrustes MODE=$MODE α=$ALPHA λ=$LAMBDA_MEAN)"
   fi
   _run_gen_on_gpu "$CUDA_VISIBLE_DEVICES" "$manifest" "$out" "$max_tokens"
 }
@@ -297,10 +380,7 @@ schedule_gpu_judges_after_gen() {
     vlsafe_examine_eval|spa_vl_test_530|mmsb_vision_risk_sdtypo|mm_safetybench_300)
       run_actionable_judge "$stem" "$bg"
       ;;
-    siuo_167)
-      run_context_judge "$stem" "$manifest" "$bg"
-      ;;
-    mssbench_unsafe_full)
+    siuo_167|mssbench_unsafe_full)
       run_context_judge "$stem" "$manifest" "$bg"
       ;;
     benign_multimodal_n60|mossbench|xstest_safe)
@@ -399,20 +479,25 @@ run_all_gpu_judges_sequential() {
 }
 
 log "ROOT=$ROOT"
-log "VLM=$VLM OUT_DIR=$OUT_DIR"
+log "VLM=$VLM MODE=$MODE OUT_DIR=$OUT_DIR"
+log "PR_DIR=$PR_DIR"
+log "PARAMS=$PROCRUSTES_PARAMS"
+if [[ "$MEAN_SHIFT_MODE" == "refusal_projected" ]]; then
+  log "REFUSAL_DIR=$REFUSAL_DIR"
+fi
 log "GEN_GPU=$CUDA_VISIBLE_DEVICES JUDGE_GPU=$(judge_gpu) DUAL_GPU=$DUAL_GPU GEN_SHARD=$GEN_SHARD"
 log "VENV=$VENV JUDGE_CFG=$JUDGE_CFG"
 
 if [[ "$SKIP_GEN" != "1" ]]; then
   if [[ "$DUAL_GPU" == "1" && "$SKIP_JUDGE" != "1" ]]; then
-    log "pipeline mode: gen on GPU $CUDA_VISIBLE_DEVICES, judge on GPU $(judge_gpu)"
+    log "pipeline mode: Procrustes gen on GPU $CUDA_VISIBLE_DEVICES, judge on GPU $(judge_gpu)"
     run_gen_and_maybe_judge "vlsafe_examine_eval"      "$DATA/manifests/vlsafe_examine_eval.jsonl"      256
     run_gen_and_maybe_judge "spa_vl_test_530"          "$DATA/manifests/spa_vl_test_530.jsonl"          192
     run_gen_and_maybe_judge "mmsb_vision_risk_sdtypo"  "$DATA/manifests/mmsb_vision_risk_sdtypo.jsonl"  192
     run_gen_and_maybe_judge "mm_safetybench_300"       "$DATA/manifests/mm_safetybench_300.jsonl"       192
     run_gen_and_maybe_judge "siuo_167"                 "$DATA/manifests/siuo_167.jsonl"                 192
     run_gen_and_maybe_judge "mssbench_unsafe_full"     "$DATA/manifests/mssbench_unsafe_full.jsonl"     192
-    # Small OR benchmarks first so GPU1 can judge while long utility gens run on GPU0.
+    # Small OR benchmarks first so GPU1 judges while long utility gens run on GPU0.
     run_gen_and_maybe_judge "mossbench"                "$DATA/manifests/mossbench.jsonl"                192
     run_gen_and_maybe_judge "xstest_safe"              "$DATA/manifests/xstest_safe.jsonl"              192
     run_gen_and_maybe_judge "benign_multimodal_n60"    "$DATA/manifests/benign_multimodal_n60.jsonl"    192
@@ -448,15 +533,15 @@ if [[ "$SKIP_JUDGE" != "1" ]]; then
   fi
   run_cpu_scores
 
-  SUMMARY_MD="$OUT_DIR/baseline_summary.md"
+  SUMMARY_MD="$OUT_DIR/procrustes_summary.md"
   "$VENV" "$EVAL/aggregate/summarize_baseline_metrics.py" \
     --out_dir "$OUT_DIR" \
-    --method "baseline" \
+    --method "$METHOD_LABEL" \
     --out_md "$SUMMARY_MD"
   log "Summary written: $SUMMARY_MD"
 else
   log "SKIP_JUDGE=1, judging/scoring phase skipped"
 fi
 
-log "DONE baseline pipeline for $VLM"
+log "DONE Procrustes pipeline for $VLM (MODE=$MODE)"
 log "Outputs: $OUT_DIR"

@@ -31,14 +31,32 @@ def _record_from_dict(row: dict) -> ManifestRecord:
     )
 
 
-def read_manifest(path: str | Path, limit: int | None = None) -> list[ManifestRecord]:
+def read_manifest(
+    path: str | Path,
+    limit: int | None = None,
+    shard_id: int | None = None,
+    num_shards: int | None = None,
+) -> list[ManifestRecord]:
     records: list[ManifestRecord] = []
     with Path(path).open("r", encoding="utf-8") as f:
         for line in f:
             if line.strip():
                 records.append(_record_from_dict(json.loads(line)))
-                if limit and len(records) >= limit:
-                    break
+
+    if shard_id is not None or num_shards is not None:
+        if shard_id is None or num_shards is None:
+            raise ValueError("shard_id and num_shards must both be set")
+        if num_shards < 1:
+            raise ValueError("num_shards must be >= 1")
+        if not 0 <= shard_id < num_shards:
+            raise ValueError(f"shard_id must be in [0, {num_shards})")
+        chunk = (len(records) + num_shards - 1) // num_shards
+        start = shard_id * chunk
+        end = min(start + chunk, len(records))
+        records = records[start:end]
+
+    if limit is not None:
+        records = records[:limit]
     return records
 
 
