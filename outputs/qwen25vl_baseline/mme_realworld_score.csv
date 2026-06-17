@@ -1,0 +1,2 @@
+method,n,correct,parse_error_count,accuracy
+qwen25vl_baseline,1660,793,259,0.4777

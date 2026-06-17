@@ -1,0 +1,2 @@
+method,n,correct,parse_error_count,accuracy
+llava15_baseline,2097,771,0,0.3677
