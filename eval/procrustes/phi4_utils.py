@@ -56,36 +56,45 @@ def _load_pretrained(model_cls, model_path: str, dtype, device_map: str, attn_im
         return model_cls.from_pretrained(model_path, **kwargs).eval()
 
 
-def _patch_remote_phi4mm_module() -> bool:
-    """PEFT vision LoRA init expects Phi4MMModel.prepare_inputs_for_generation."""
-    import sys
+def _patch_phi4mm_cls(cls) -> bool:
+    """Add prepare_inputs_for_generation stub if missing on a real Python class."""
+    if not isinstance(cls, type):
+        # torch._classes ScriptClass namespace — cannot be patched.
+        return False
+    if hasattr(cls, "prepare_inputs_for_generation"):
+        return True  # already present
 
-    patched = False
-    for mod in sys.modules.values():
-        if mod is None or not hasattr(mod, "Phi4MMModel"):
-            continue
-        cls = mod.Phi4MMModel
-        if hasattr(cls, "prepare_inputs_for_generation"):
-            continue
+    def prepare_inputs_for_generation(self, *args, **kwargs):
+        return {}
 
-        def prepare_inputs_for_generation(self, *args, **kwargs):
-            return {}
-
-        cls.prepare_inputs_for_generation = prepare_inputs_for_generation
-        patched = True
-    return patched
+    cls.prepare_inputs_for_generation = prepare_inputs_for_generation
+    return True
 
 
 def _preload_and_patch_phi4_remote(model_path: str) -> None:
     """Import remote modeling_phi4mm and patch Phi4MMModel before weight load."""
+    import sys
+
     from transformers import AutoConfig
     from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
     config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
     auto_map = getattr(config, "auto_map", None) or {}
     class_ref = auto_map.get("AutoModelForCausalLM", "modeling_phi4mm.Phi4MMForCausalLM")
-    get_class_from_dynamic_module(class_ref, model_path)
-    if not _patch_remote_phi4mm_module():
+    causal_cls = get_class_from_dynamic_module(class_ref, model_path)
+
+    # --- Locate Phi4MMModel via the returned class's own module ---------------
+    # get_class_from_dynamic_module returns a real Python class whose __module__
+    # points to the dynamic transformers_modules entry in sys.modules.  Going
+    # through that module avoids iterating sys.modules and accidentally hitting
+    # torch._classes ScriptClass namespaces (whose __getattr__ raises
+    # RuntimeError instead of AttributeError, breaking hasattr()).
+    patched = False
+    mod = sys.modules.get(causal_cls.__module__) if causal_cls is not None else None
+    if mod is not None and hasattr(mod, "Phi4MMModel"):
+        patched = _patch_phi4mm_cls(mod.Phi4MMModel)
+
+    if not patched:
         raise RuntimeError(
             "Failed to patch Phi4MMModel.prepare_inputs_for_generation for PEFT. "
             "Try: rm -rf ~/.cache/huggingface/modules/transformers_modules/Phi_hyphen_4_hyphen_multimodal_hyphen_instruct"
