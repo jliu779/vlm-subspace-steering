@@ -77,53 +77,31 @@ def _patch_remote_phi4mm_module() -> bool:
 
 
 def _preload_and_patch_phi4_remote(model_path: str) -> None:
-    """Import cached remote modeling_phi4mm and patch before weight load."""
+    """Import remote modeling_phi4mm and patch Phi4MMModel before weight load."""
     from transformers import AutoConfig
     from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
     config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
     auto_map = getattr(config, "auto_map", None) or {}
-    class_ref = auto_map.get("AutoModelForCausalLM")
-    if class_ref:
-        get_class_from_dynamic_module(class_ref, model_path)
-    _patch_remote_phi4mm_module()
-
-
-def load_phi4(
-    model_path: str = "/hub/huggingface/models/microsoft/Phi-4-multimodal-instruct",
-    dtype=torch.bfloat16,
-    device_map: str = "auto",
-    attn_implementation: str = "eager",
-):
-    """Load Phi-4-multimodal via transformers + AutoProcessor.
-
-    Prefers the in-tree ``Phi4MultimodalForCausalLM`` (no PEFT-in-__init__ issue).
-    Falls back to remote ``Phi4MMForCausalLM`` with a PEFT compatibility patch for
-    stale cached ``modeling_phi4mm.py`` files missing ``prepare_inputs_for_generation``.
-
-    Defaults to eager attention (no flash-attn requirement). Set
-    attn_implementation="flash_attention_2" on Ampere+ if flash-attn is installed.
-    """
-    from transformers import AutoModelForCausalLM, AutoProcessor
-
-    processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
-
-    try:
-        from transformers import Phi4MultimodalForCausalLM
-
-        model = _load_pretrained(
-            Phi4MultimodalForCausalLM,
-            model_path,
-            dtype,
-            device_map,
-            attn_implementation,
+    class_ref = auto_map.get("AutoModelForCausalLM", "modeling_phi4mm.Phi4MMForCausalLM")
+    get_class_from_dynamic_module(class_ref, model_path)
+    if not _patch_remote_phi4mm_module():
+        raise RuntimeError(
+            "Failed to patch Phi4MMModel.prepare_inputs_for_generation for PEFT. "
+            "Try: rm -rf ~/.cache/huggingface/modules/transformers_modules/Phi_hyphen_4_hyphen_multimodal_hyphen_instruct"
         )
-        return model, processor
-    except ImportError:
-        pass
+
+
+def _load_phi4_remote(
+    model_path: str,
+    dtype,
+    device_map: str,
+    attn_implementation: str,
+):
+    from transformers import AutoModelForCausalLM
 
     _preload_and_patch_phi4_remote(model_path)
-    model = _load_pretrained(
+    return _load_pretrained(
         AutoModelForCausalLM,
         model_path,
         dtype,
@@ -132,6 +110,46 @@ def load_phi4(
         trust_remote_code=True,
         _attn_implementation=attn_implementation,
     )
+
+
+def load_phi4(
+    model_path: str = "/hub/huggingface/models/microsoft/Phi-4-multimodal-instruct",
+    dtype=torch.bfloat16,
+    device_map: str = "auto",
+    attn_implementation: str = "eager",
+):
+    """Load Phi-4-multimodal via remote modeling_phi4mm + AutoProcessor.
+
+    microsoft/Phi-4-multimodal-instruct uses ``model_type=phi4mm`` (remote code),
+    not the in-tree ``phi4_multimodal`` class. We patch ``Phi4MMModel`` for PEFT
+    compatibility before loading weights.
+
+    Defaults to eager attention (no flash-attn requirement). Set
+    attn_implementation="flash_attention_2" on Ampere+ if flash-attn is installed.
+    """
+    from transformers import AutoConfig, AutoProcessor
+
+    processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+    config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+    model_type = getattr(config, "model_type", "")
+
+    # Only HF repos published as phi4_multimodal can use the in-tree class.
+    if model_type == "phi4_multimodal":
+        try:
+            from transformers import Phi4MultimodalForCausalLM
+
+            model = _load_pretrained(
+                Phi4MultimodalForCausalLM,
+                model_path,
+                dtype,
+                device_map,
+                attn_implementation,
+            )
+            return model, processor
+        except Exception:
+            pass
+
+    model = _load_phi4_remote(model_path, dtype, device_map, attn_implementation)
     return model, processor
 
 
