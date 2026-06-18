@@ -31,7 +31,7 @@ def generate_one(model, processor, record, mode: str, max_new_tokens: int = 256)
         inputs = processor(text=prompt, images=img, return_tensors="pt")
     else:
         inputs = processor(text=prompt, return_tensors="pt")
-    inputs = {k: v.to(device) for k, v in inputs.items()}
+    inputs = {k: v.to(device) if hasattr(v, "to") else v for k, v in inputs.items()}
 
     with torch.no_grad():
         out_ids = model.generate(
