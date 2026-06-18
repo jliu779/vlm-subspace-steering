@@ -79,8 +79,10 @@ def _patch_dynamic_cache_compat() -> None:
 
     def _get_max_length(self):
         if hasattr(self, "get_max_cache_shape"):
-            return self.get_max_cache_shape()
-        return None
+            shape = self.get_max_cache_shape()
+            if shape is not None:
+                return shape
+        return 4096
 
     for name in dir(cache_utils):
         cls = getattr(cache_utils, name, None)
@@ -97,6 +99,22 @@ def _patch_dynamic_cache_compat() -> None:
 def ensure_phi4_transformers_compat() -> None:
     """Apply all transformers-side shims needed for Phi-4 remote code."""
     _patch_dynamic_cache_compat()
+
+
+def _patch_phi4mm_forward(mod) -> None:
+    """Guard Phi4MMForCausalLM.forward when num_logits_to_keep is None."""
+    cls = getattr(mod, "Phi4MMForCausalLM", None)
+    if cls is None or getattr(cls, "_phi4_forward_patched", False):
+        return
+    orig_forward = cls.forward
+
+    def forward(self, *args, num_logits_to_keep=None, **kwargs):
+        if num_logits_to_keep is None:
+            num_logits_to_keep = 1
+        return orig_forward(self, *args, num_logits_to_keep=num_logits_to_keep, **kwargs)
+
+    cls.forward = forward
+    cls._phi4_forward_patched = True
 
 
 def _patch_phi4mm_cls(cls) -> bool:
@@ -136,6 +154,8 @@ def _preload_and_patch_phi4_remote(model_path: str) -> None:
     mod = sys.modules.get(causal_cls.__module__) if causal_cls is not None else None
     if mod is not None and hasattr(mod, "Phi4MMModel"):
         patched = _patch_phi4mm_cls(mod.Phi4MMModel)
+    if mod is not None:
+        _patch_phi4mm_forward(mod)
 
     if not patched:
         raise RuntimeError(

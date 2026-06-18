@@ -39,6 +39,9 @@ def generate_one(model, processor, record, mode: str, max_new_tokens: int = 256)
             max_new_tokens=max_new_tokens,
             do_sample=False,
             use_cache=False,
+            # Remote modeling_phi4mm.py slices hidden_states[:, -num_logits_to_keep:];
+            # None triggers "bad operand type for unary -: 'NoneType'".
+            num_logits_to_keep=1,
         )
     prompt_len = inputs["input_ids"].shape[1]
     new_ids = out_ids[:, prompt_len:]
