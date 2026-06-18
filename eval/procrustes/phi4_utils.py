@@ -56,6 +56,22 @@ def _load_pretrained(model_cls, model_path: str, dtype, device_map: str, attn_im
         return model_cls.from_pretrained(model_path, **kwargs).eval()
 
 
+def _patch_dynamic_cache_compat() -> None:
+    """Back-port ``DynamicCache.get_usable_length`` removed in transformers ≥ 4.50.
+
+    The remote ``modeling_phi4mm.py`` from microsoft/Phi-4-multimodal-instruct
+    still calls ``past_key_values.get_usable_length(seq_len)``.  In newer
+    transformers the method was renamed to ``get_seq_length()``.  We add a
+    shim so the remote code works without modification.
+    """
+    from transformers.cache_utils import DynamicCache
+
+    if not hasattr(DynamicCache, "get_usable_length"):
+        DynamicCache.get_usable_length = (
+            lambda self, seq_len=0, *a, **kw: self.get_seq_length()
+        )
+
+
 def _patch_phi4mm_cls(cls) -> bool:
     """Add prepare_inputs_for_generation stub if missing on a real Python class."""
     if not isinstance(cls, type):
@@ -138,6 +154,7 @@ def load_phi4(
     """
     from transformers import AutoConfig, AutoProcessor
 
+    _patch_dynamic_cache_compat()
     processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
     config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
     model_type = getattr(config, "model_type", "")
