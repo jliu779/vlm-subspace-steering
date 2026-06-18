@@ -14,7 +14,7 @@ from PIL import Image
 from tqdm import tqdm
 
 from procrustes.cmrm_compat import read_manifest
-from procrustes.phi4_utils import build_phi4_prompt, load_phi4
+from procrustes.phi4_utils import build_phi4_prompt, ensure_phi4_transformers_compat, load_phi4
 
 
 def _load_image(path: str) -> Image.Image:
@@ -38,6 +38,7 @@ def generate_one(model, processor, record, mode: str, max_new_tokens: int = 256)
             **inputs,
             max_new_tokens=max_new_tokens,
             do_sample=False,
+            use_cache=False,
         )
     prompt_len = inputs["input_ids"].shape[1]
     new_ids = out_ids[:, prompt_len:]
@@ -59,6 +60,7 @@ def main() -> None:
     parser.add_argument("--out", required=True)
     args = parser.parse_args()
 
+    ensure_phi4_transformers_compat()
     records = read_manifest(args.manifest, limit=args.limit)
     model, processor = load_phi4(args.model_path)
     method_tag = "phi4_baseline"

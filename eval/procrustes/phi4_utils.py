@@ -57,19 +57,46 @@ def _load_pretrained(model_cls, model_path: str, dtype, device_map: str, attn_im
 
 
 def _patch_dynamic_cache_compat() -> None:
-    """Back-port ``DynamicCache.get_usable_length`` removed in transformers ≥ 4.50.
+    """Shim legacy KV-cache APIs expected by remote ``modeling_phi4mm.py``.
 
-    The remote ``modeling_phi4mm.py`` from microsoft/Phi-4-multimodal-instruct
-    still calls ``past_key_values.get_usable_length(seq_len)``.  In newer
-    transformers the method was renamed to ``get_seq_length()``.  We add a
-    shim so the remote code works without modification.
+    transformers ≥ 4.50 removed ``Cache.get_usable_length`` / ``get_max_length``.
+    Phi-4 remote attention still calls them during ``model.generate()``.
     """
-    from transformers.cache_utils import DynamicCache
+    try:
+        import transformers.cache_utils as cache_utils
+    except ImportError:
+        return
+    if getattr(cache_utils, "_phi4_cache_compat_patch", False):
+        return
 
-    if not hasattr(DynamicCache, "get_usable_length"):
-        DynamicCache.get_usable_length = (
-            lambda self, seq_len=0, *a, **kw: self.get_seq_length()
-        )
+    def _get_usable_length(self, seq_length=0, layer_idx=0):
+        if hasattr(self, "get_seq_length"):
+            try:
+                return int(self.get_seq_length(layer_idx))
+            except TypeError:
+                return int(self.get_seq_length())
+        return 0
+
+    def _get_max_length(self):
+        if hasattr(self, "get_max_cache_shape"):
+            return self.get_max_cache_shape()
+        return None
+
+    for name in dir(cache_utils):
+        cls = getattr(cache_utils, name, None)
+        if not isinstance(cls, type):
+            continue
+        if not hasattr(cls, "get_usable_length"):
+            cls.get_usable_length = _get_usable_length
+        if not hasattr(cls, "get_max_length"):
+            cls.get_max_length = _get_max_length
+
+    cache_utils._phi4_cache_compat_patch = True
+
+
+def ensure_phi4_transformers_compat() -> None:
+    """Apply all transformers-side shims needed for Phi-4 remote code."""
+    _patch_dynamic_cache_compat()
 
 
 def _patch_phi4mm_cls(cls) -> bool:
@@ -154,7 +181,7 @@ def load_phi4(
     """
     from transformers import AutoConfig, AutoProcessor
 
-    _patch_dynamic_cache_compat()
+    ensure_phi4_transformers_compat()
     processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
     config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
     model_type = getattr(config, "model_type", "")
@@ -171,11 +198,13 @@ def load_phi4(
                 device_map,
                 attn_implementation,
             )
+            model.config.use_cache = False
             return model, processor
         except Exception:
             pass
 
     model = _load_phi4_remote(model_path, dtype, device_map, attn_implementation)
+    model.config.use_cache = False
     return model, processor
 
 
@@ -193,4 +222,5 @@ __all__ = [
     "make_blank_pil",
     "get_decoder_layers",
     "build_phi4_prompt",
+    "ensure_phi4_transformers_compat",
 ]
