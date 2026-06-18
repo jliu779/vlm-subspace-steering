@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run full baseline (all benchmarks) for all 8 VLMs sequentially.
+# Run full baseline (all benchmarks) for 8 VLMs sequentially.
 #
 # Usage (on GPU server):
 #   conda activate venv_neurostrike
@@ -24,14 +24,14 @@ CONTINUE_ON_ERROR="${CONTINUE_ON_ERROR:-0}"
 log() { echo "[$(date +%T)] $*"; }
 
 declare -a JOBS=(
+  "llava15:/hub/huggingface/models/llava-hf/llava-1.5-7b-hf"
   "qwen25vl:/hub/huggingface/models/Qwen/Qwen2.5-VL-7B-Instruct"
+  "internvl3:/hub/huggingface/models/OpenGVLab/InternVL3-8B"
   "qwen3vl:/hub/huggingface/models/Qwen/Qwen3-VL-8B-Instruct"
   "internvl:/hub/huggingface/models/OpenGVLab/InternVL3_5-8B"
-  "internvl3:/hub/huggingface/models/OpenGVLab/InternVL3-8B"
-  "llava_next:/hub/huggingface/models/llava-hf/llava-v1.6-mistral-7b-hf"
-  "llava15:/hub/huggingface/models/llava-hf/llava-1.5-7b-hf"
-  "phi35v:/hub/huggingface/models/microsoft/Phi-3.5-vision-instruct"
   "gemma3:/hub/huggingface/models/google/gemma-3-4b-it"
+  "phi4:/hub/huggingface/models/microsoft/Phi-4-multimodal-instruct"
+  "glm41v:/hub/huggingface/models/zai-org/GLM-4.1V-9B-Thinking"
 )
 
 run_one() {

@@ -54,7 +54,7 @@ fi
 BASELINE_SCRIPT="$EVAL/baseline/${VLM}_baseline.py"
 if [[ ! -f "$BASELINE_SCRIPT" ]]; then
   echo "ERROR: unknown VLM '$VLM' (missing $BASELINE_SCRIPT)" >&2
-  echo "Supported: qwen25vl qwen3vl internvl internvl3 llava_next llava15 phi35v gemma3" >&2
+  echo "Supported: qwen25vl qwen3vl internvl internvl3 llava_next llava15 phi35v gemma3 phi4 glm41v" >&2
   exit 1
 fi
 
