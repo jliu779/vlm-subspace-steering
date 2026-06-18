@@ -13,8 +13,6 @@
 #   SKIP_GEN=1 bash eval/runners/run_baseline_full.sh
 #   SKIP_JUDGE=1 bash eval/runners/run_baseline_full.sh
 #   DUAL_GPU=0 bash eval/runners/run_baseline_full.sh   # single-GPU sequential
-#   GEN_SHARD=auto bash ...  # split large benchmarks across GPU0+GPU1 (default)
-#   GEN_SHARD=0 bash ...     # disable dual-GPU sharded generation
 set -euo pipefail
 
 # ===== CONFIG (edit these) =====
@@ -22,8 +20,6 @@ VLM="${VLM:-qwen25vl}"                          # qwen25vl | qwen3vl | internvl 
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" # VLM generation GPU
 JUDGE_GPU="${JUDGE_GPU:-1}"                     # judge GPU (default: second card)
 DUAL_GPU="${DUAL_GPU:-1}"                       # 1 = pipeline gen@GPU0 + judge@GPU1
-GEN_SHARD="${GEN_SHARD:-auto}"                    # auto|2 = shard large manifests on both GPUs; 0 = off
-SHARD_MIN_LINES="${SHARD_MIN_LINES:-500}"         # auto-shard when manifest has >= this many lines
 VENV="${VENV:-python3}"
 MODEL_PATH="${MODEL_PATH:-}"
 JUDGE_CFG="${JUDGE_CFG:-}"
@@ -62,15 +58,34 @@ mkdir -p "$OUT_DIR"
 
 log() { echo "[$(date +%T)] $*"; }
 
-# shellcheck source=lib_gen_shard.sh
-source "$SCRIPT_DIR/lib_gen_shard.sh"
-
 judge_gpu() {
   if [[ "$DUAL_GPU" == "1" ]]; then
     echo "$JUDGE_GPU"
   else
     echo "$CUDA_VISIBLE_DEVICES"
   fi
+}
+
+check_judges() {
+  # Non-blocking: reap any already-finished judge jobs and fail fast on error.
+  local still_running=()
+  local pid
+  for pid in "${JUDGE_PIDS[@]}"; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      # Process already exited — collect its status.
+      if ! wait "$pid"; then
+        log "ERROR: background judge PID $pid failed"
+        # Kill remaining background judges before exiting.
+        for p in "${JUDGE_PIDS[@]}"; do
+          kill "$p" 2>/dev/null || true
+        done
+        exit 1
+      fi
+    else
+      still_running+=("$pid")
+    fi
+  done
+  JUDGE_PIDS=("${still_running[@]+"${still_running[@]}"}")
 }
 
 wait_judges() {
@@ -80,7 +95,7 @@ wait_judges() {
   log "waiting for ${#JUDGE_PIDS[@]} background judge job(s)..."
   local pid
   for pid in "${JUDGE_PIDS[@]}"; do
-    wait "$pid" || exit 1
+    wait "$pid" || { log "ERROR: background judge PID $pid failed"; exit 1; }
   done
   JUDGE_PIDS=()
 }
@@ -90,6 +105,7 @@ _run_gen_on_gpu() {
   local manifest="$2"
   local out="$3"
   local max_tokens="$4"
+  local tmp="${out}.tmp"
 
   local extra=()
   if [[ -n "$LIMIT" ]]; then
@@ -99,61 +115,18 @@ _run_gen_on_gpu() {
   if [[ -n "$MODEL_PATH" ]]; then
     model_args+=(--model_path "$MODEL_PATH")
   fi
-  CUDA_VISIBLE_DEVICES="$gpu" "$VENV" "$BASELINE_SCRIPT" \
-    --manifest "$manifest" \
-    --mode orig \
-    --max_new_tokens "$max_tokens" \
-    --out "$out" \
-    "${model_args[@]}" \
-    "${extra[@]}"
-}
-
-run_gen_sharded() {
-  local stem="$1"
-  local manifest="$2"
-  local max_tokens="$3"
-  local out="$OUT_DIR/${stem}.jsonl"
-  local shard_dir="$OUT_DIR/.shards"
-  local m0="$shard_dir/${stem}.shard0.jsonl"
-  local m1="$shard_dir/${stem}.shard1.jsonl"
-  local o0="$OUT_DIR/${stem}.part0.jsonl"
-  local o1="$OUT_DIR/${stem}.part1.jsonl"
-
-  wait_judges
-  mkdir -p "$shard_dir"
-  shard_split_manifest_halves "$manifest" "$m0" "$m1"
-  local n0 n1
-  n0="$(shard_count_lines "$m0")"
-  n1="$(shard_count_lines "$m1")"
-  log "RUN gen $stem SHARDED on GPU $CUDA_VISIBLE_DEVICES ($n0) + GPU $JUDGE_GPU ($n1)"
-
-  local pid0="" pid1=""
-  if [[ ! -f "$o0" || ! -s "$o0" ]]; then
-    _run_gen_on_gpu "$CUDA_VISIBLE_DEVICES" "$m0" "$o0" "$max_tokens" &
-    pid0=$!
-  else
-    log "SKIP shard0 gen $stem (exists)"
-  fi
-  if [[ ! -f "$o1" || ! -s "$o1" ]]; then
-    if [[ "$n1" -gt 0 ]]; then
-      _run_gen_on_gpu "$JUDGE_GPU" "$m1" "$o1" "$max_tokens" &
-      pid1=$!
-    else
-      : >"$o1"
-      log "SKIP shard1 gen $stem (empty shard)"
-    fi
-  else
-    log "SKIP shard1 gen $stem (exists)"
-  fi
-  if [[ -n "$pid0" ]]; then
-    wait "$pid0"
-  fi
-  if [[ -n "$pid1" ]]; then
-    wait "$pid1"
-  fi
-  shard_merge_jsonl "$out" "$o0" "$o1"
-  rm -f "$o0" "$o1"
-  log "MERGED sharded gen $stem -> $out"
+  # Write to tmp file; atomically rename on success so partial output is
+  # never mistaken for a complete run on restart.
+  ( export CUDA_VISIBLE_DEVICES="$gpu"
+    "$VENV" "$BASELINE_SCRIPT" \
+      --manifest "$manifest" \
+      --mode orig \
+      --max_new_tokens "$max_tokens" \
+      --out "$tmp" \
+      "${model_args[@]}" \
+      "${extra[@]}"
+  )
+  mv "$tmp" "$out"
 }
 
 run_gen() {
@@ -162,13 +135,11 @@ run_gen() {
   local max_tokens="$3"
   local out="$OUT_DIR/${stem}.jsonl"
 
+  # Fail fast if any background judge already exited with error.
+  check_judges
+
   if [[ -f "$out" && -s "$out" ]]; then
     log "SKIP gen $stem (exists)"
-    return 0
-  fi
-
-  if should_gen_shard "$manifest"; then
-    run_gen_sharded "$stem" "$manifest" "$max_tokens"
     return 0
   fi
 
@@ -198,11 +169,15 @@ run_actionable_judge() {
   fi
 
   _run_actionable_judge_impl() {
-    CUDA_VISIBLE_DEVICES="$gpu" "$VENV" "$EVAL/judge/judge_actionable_safety.py" \
-      --config "$JUDGE_CFG" \
-      --judge_style actionable \
-      --generations "$gen" \
-      --out "$judged"
+    local _tmp="${judged}.tmp"
+    ( export CUDA_VISIBLE_DEVICES="$gpu"
+      "$VENV" "$EVAL/judge/judge_actionable_safety.py" \
+        --config "$JUDGE_CFG" \
+        --judge_style actionable \
+        --generations "$gen" \
+        --out "$_tmp"
+    )
+    mv "$_tmp" "$judged"
   }
 
   if [[ "$bg" == "1" ]]; then
@@ -234,11 +209,15 @@ run_context_judge() {
   fi
 
   _run_context_judge_impl() {
-    CUDA_VISIBLE_DEVICES="$gpu" "$VENV" "$EVAL/judge/judge_context_aware.py" \
-      --config "$JUDGE_CFG" \
-      --generations "$gen" \
-      --manifest "$manifest" \
-      --out "$judged"
+    local _tmp="${judged}.tmp"
+    ( export CUDA_VISIBLE_DEVICES="$gpu"
+      "$VENV" "$EVAL/judge/judge_context_aware.py" \
+        --config "$JUDGE_CFG" \
+        --generations "$gen" \
+        --manifest "$manifest" \
+        --out "$_tmp"
+    )
+    mv "$_tmp" "$judged"
   }
 
   if [[ "$bg" == "1" ]]; then
@@ -269,10 +248,14 @@ run_over_refusal_judge() {
   fi
 
   _run_over_refusal_judge_impl() {
-    CUDA_VISIBLE_DEVICES="$gpu" "$VENV" "$EVAL/judge/judge_over_refusal.py" \
-      --config "$JUDGE_CFG" \
-      --generations "$gen" \
-      --out "$judged"
+    local _tmp="${judged}.tmp"
+    ( export CUDA_VISIBLE_DEVICES="$gpu"
+      "$VENV" "$EVAL/judge/judge_over_refusal.py" \
+        --config "$JUDGE_CFG" \
+        --generations "$gen" \
+        --out "$_tmp"
+    )
+    mv "$_tmp" "$judged"
   }
 
   if [[ "$bg" == "1" ]]; then
@@ -400,7 +383,7 @@ run_all_gpu_judges_sequential() {
 
 log "ROOT=$ROOT"
 log "VLM=$VLM OUT_DIR=$OUT_DIR"
-log "GEN_GPU=$CUDA_VISIBLE_DEVICES JUDGE_GPU=$(judge_gpu) DUAL_GPU=$DUAL_GPU GEN_SHARD=$GEN_SHARD"
+log "GEN_GPU=$CUDA_VISIBLE_DEVICES JUDGE_GPU=$(judge_gpu) DUAL_GPU=$DUAL_GPU"
 log "VENV=$VENV JUDGE_CFG=$JUDGE_CFG"
 
 if [[ "$SKIP_GEN" != "1" ]]; then
