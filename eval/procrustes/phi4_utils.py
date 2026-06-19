@@ -189,6 +189,7 @@ def load_phi4(
     dtype=torch.bfloat16,
     device_map: str = "auto",
     attn_implementation: str = "eager",
+    use_cache: bool = True,
 ):
     """Load Phi-4-multimodal via remote modeling_phi4mm + AutoProcessor.
 
@@ -218,13 +219,13 @@ def load_phi4(
                 device_map,
                 attn_implementation,
             )
-            model.config.use_cache = False
+            model.config.use_cache = use_cache
             return model, processor
         except Exception:
             pass
 
     model = _load_phi4_remote(model_path, dtype, device_map, attn_implementation)
-    model.config.use_cache = False
+    model.config.use_cache = use_cache
     return model, processor
 
 

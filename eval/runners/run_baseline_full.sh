@@ -13,6 +13,8 @@
 #   SKIP_GEN=1 bash eval/runners/run_baseline_full.sh
 #   SKIP_JUDGE=1 bash eval/runners/run_baseline_full.sh
 #   DUAL_GPU=0 bash eval/runners/run_baseline_full.sh   # single-GPU sequential
+#   VLM=phi4 PHI4_ATTN_IMPLEMENTATION=flash_attention_2 bash eval/runners/run_baseline_full.sh
+#   VLM=phi4 PHI4_DISABLE_CACHE=1 bash eval/runners/run_baseline_full.sh  # slow compatibility fallback
 set -euo pipefail
 
 # ===== CONFIG (edit these) =====
@@ -26,6 +28,8 @@ JUDGE_CFG="${JUDGE_CFG:-}"
 LIMIT="${LIMIT:-}"
 SKIP_GEN="${SKIP_GEN:-0}"
 SKIP_JUDGE="${SKIP_JUDGE:-0}"
+PHI4_ATTN_IMPLEMENTATION="${PHI4_ATTN_IMPLEMENTATION:-eager}" # eager | sdpa | flash_attention_2
+PHI4_DISABLE_CACHE="${PHI4_DISABLE_CACHE:-0}"
 # ==============================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -114,6 +118,12 @@ _run_gen_on_gpu() {
   local model_args=()
   if [[ -n "$MODEL_PATH" ]]; then
     model_args+=(--model_path "$MODEL_PATH")
+  fi
+  if [[ "$VLM" == "phi4" ]]; then
+    model_args+=(--attn_implementation "$PHI4_ATTN_IMPLEMENTATION")
+    if [[ "$PHI4_DISABLE_CACHE" == "1" ]]; then
+      model_args+=(--disable_cache)
+    fi
   fi
   # Write to tmp file; atomically rename on success so partial output is
   # never mistaken for a complete run on restart.
