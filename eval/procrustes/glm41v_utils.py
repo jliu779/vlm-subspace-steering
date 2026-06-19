@@ -35,6 +35,7 @@ def load_glm41v(
     dtype=torch.bfloat16,
     device_map: str = "auto",
     attn_implementation: str = "eager",
+    use_cache: bool = True,
 ):
     """Load GLM-4.1V-9B-Thinking via Glm4vForConditionalGeneration + AutoProcessor."""
     from transformers import AutoProcessor, Glm4vForConditionalGeneration
@@ -46,6 +47,7 @@ def load_glm41v(
         device_map=device_map,
         attn_implementation=attn_implementation,
     ).eval()
+    model.config.use_cache = use_cache
     return model, processor
 
 
