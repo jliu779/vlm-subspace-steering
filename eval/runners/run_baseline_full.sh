@@ -15,6 +15,9 @@
 #   DUAL_GPU=0 bash eval/runners/run_baseline_full.sh   # single-GPU sequential
 #   VLM=phi4 PHI4_ATTN_IMPLEMENTATION=flash_attention_2 bash eval/runners/run_baseline_full.sh
 #   VLM=phi4 PHI4_DISABLE_CACHE=1 bash eval/runners/run_baseline_full.sh  # slow compatibility fallback
+#
+# Judge + score an arbitrary pre-generated output dir (no VLM baseline script needed):
+#   OUT_DIR=outputs/my_method SKIP_GEN=1 bash eval/runners/run_baseline_full.sh
 set -euo pipefail
 
 # ===== CONFIG (edit these) =====
@@ -37,7 +40,11 @@ ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 EVAL="$ROOT/eval"
 DATA="$ROOT/data"
 OUT_BASE="${OUT_BASE:-$ROOT/outputs}"
-OUT_DIR="$OUT_BASE/${VLM}_baseline"
+# OUT_DIR can be set directly to support arbitrary method output dirs
+# (e.g. OUT_DIR=outputs/my_method SKIP_GEN=1 bash run_baseline_full.sh)
+OUT_DIR="${OUT_DIR:-$OUT_BASE/${VLM}_baseline}"
+# Normalise to absolute path (relative paths are resolved from ROOT).
+[[ "$OUT_DIR" != /* ]] && OUT_DIR="$ROOT/$OUT_DIR"
 
 JUDGE_PIDS=()
 
@@ -51,10 +58,12 @@ if [[ ! -f "$JUDGE_CFG" ]]; then
   exit 1
 fi
 
+# BASELINE_SCRIPT is only needed for generation; skip this check when SKIP_GEN=1
 BASELINE_SCRIPT="$EVAL/baseline/${VLM}_baseline.py"
-if [[ ! -f "$BASELINE_SCRIPT" ]]; then
+if [[ "$SKIP_GEN" != "1" && ! -f "$BASELINE_SCRIPT" ]]; then
   echo "ERROR: unknown VLM '$VLM' (missing $BASELINE_SCRIPT)" >&2
   echo "Supported: qwen25vl qwen3vl internvl internvl3 llava_next llava15 phi35v gemma3 phi4 glm41v" >&2
+  echo "To judge/score an existing output dir, set SKIP_GEN=1 and OUT_DIR=<path>." >&2
   exit 1
 fi
 
@@ -442,9 +451,10 @@ if [[ "$SKIP_JUDGE" != "1" ]]; then
   run_cpu_scores
 
   SUMMARY_MD="$OUT_DIR/baseline_summary.md"
+  METHOD_TAG="$(basename "$OUT_DIR")"
   "$VENV" "$EVAL/aggregate/summarize_baseline_metrics.py" \
     --out_dir "$OUT_DIR" \
-    --method "baseline" \
+    --method "$METHOD_TAG" \
     --out_md "$SUMMARY_MD"
   log "Summary written: $SUMMARY_MD"
 else

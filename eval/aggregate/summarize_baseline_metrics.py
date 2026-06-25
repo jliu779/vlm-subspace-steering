@@ -50,7 +50,9 @@ def read_mathvista_csv(path: Path) -> str:
     for row in rows:
         if row.get("split") == "all":
             acc = row.get("accuracy")
-            return f"{float(acc) * 100:.2f}%" if acc is not None else "N/A"
+            # score_mathvista.py writes accuracy as a percentage (100*c/n),
+            # so no further multiplication is needed here.
+            return f"{float(acc):.2f}%" if acc is not None else "N/A"
     return "N/A"
 
 

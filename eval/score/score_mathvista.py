@@ -51,7 +51,7 @@ def match_free(resp, gold, atype, precision):
             if v is None: continue
             if atype == "integer" and round(v) == round(g): return True
             if atype == "float":
-                p = precision if isinstance(precision, int) else 2
+                p = int(precision) if precision is not None else 2
                 if round(v, p) == round(g, p): return True
         return False
     # list / text fallback: normalised substring / token match
