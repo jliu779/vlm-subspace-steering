@@ -1,4 +1,4 @@
-# baseline summary — `qwen25vl_baseline`
+# qwen25vl_baseline summary — `qwen25vl_baseline`
 
 | Benchmark | Metric | Value |
 |---|---|---|
@@ -9,10 +9,10 @@
 | Cell D/SIUO | unsafe% | 42.51% (71/167) |
 | Cell D/MSSB | unsafe% | 5.50% (33/600) |
 | Utility sciqa full | acc% | 87.94% |
-| Utility MMStar | acc% | 51.00% |
-| Utility MME-RW | acc% | 47.77% |
-| Utility MathVista | acc% | 5930.00% |
-| Utility ColorBench | acc% | 7221.75% |
+| Utility MMStar | acc% | 51.33% |
+| Utility MME-RW | acc% | 41.32% |
+| Utility MathVista | acc% | 59.30% |
+| Utility ColorBench | acc% | 72.22% |
 | Utility OR | OR% | 0.00% (0/60) |
 | Utility MOSSBench OR | OR% | 5.67% (17/300) |
 | Utility XSTest OR | OR% | 26.80% (67/250) |

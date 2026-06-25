@@ -1,2 +1,2 @@
 method,n,correct,parse_error_count,accuracy
-llava_next_baseline,1660,559,259,0.3367
+llava_next_baseline,1919,559,259,0.2913

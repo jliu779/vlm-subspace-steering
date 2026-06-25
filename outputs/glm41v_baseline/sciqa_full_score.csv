@@ -1,2 +1,2 @@
 method,n,correct,parse_error_count,accuracy
-glm41v_baseline,1956,806,141,0.4121
+glm41v_baseline,2097,874,141,0.4168

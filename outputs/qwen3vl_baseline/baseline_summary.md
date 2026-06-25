@@ -9,10 +9,10 @@
 | Cell D/SIUO | unsafe% | 31.74% (53/167) |
 | Cell D/MSSB | unsafe% | 4.67% (28/600) |
 | Utility sciqa full | acc% | 94.28% |
-| Utility MMStar | acc% | 42.53% |
-| Utility MME-RW | acc% | 49.70% |
-| Utility MathVista | acc% | 5510.00% |
-| Utility ColorBench | acc% | 7367.88% |
+| Utility MMStar | acc% | 46.20% |
+| Utility MME-RW | acc% | 42.99% |
+| Utility MathVista | acc% | 55.10% |
+| Utility ColorBench | acc% | 73.68% |
 | Utility OR | OR% | 0.00% (0/60) |
 | Utility MOSSBench OR | OR% | 22.00% (66/300) |
 | Utility XSTest OR | OR% | 34.54% (86/249) |

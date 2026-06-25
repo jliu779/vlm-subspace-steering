@@ -1,2 +1,2 @@
 method,n,correct,parse_error_count,accuracy
-qwen3vl_baseline,1500,638,0,0.4253
+qwen3vl_baseline,1500,693,179,0.4620

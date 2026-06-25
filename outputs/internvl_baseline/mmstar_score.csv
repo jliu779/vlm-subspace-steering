@@ -1,2 +1,2 @@
 method,n,correct,parse_error_count,accuracy
-internvl_baseline,1500,642,0,0.4280
+internvl_baseline,1500,657,302,0.4380

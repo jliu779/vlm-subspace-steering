@@ -1,2 +1,2 @@
 method,n,correct,parse_error_count,accuracy
-gemma3_baseline,2097,1587,0,0.7568
+gemma3_baseline,2097,1579,10,0.7530
